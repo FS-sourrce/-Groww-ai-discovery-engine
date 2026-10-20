@@ -6,6 +6,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Groww AI Discovery Engine", page_icon="🔎", layout="wide")
 DATA_PATH = Path(__file__).parent / "research_dataset.csv"
+SIP_RESEARCH_PATH = Path(__file__).parent / "groww_sip_research_starter.csv"
 
 THEMES = {
     "App reliability": ["crash", "crashes", "crashing", "glitch", "glitches", "stuck", "hang", "slow", "loading", "not opening", "not working", "bug", "error", "freeze"],
@@ -90,7 +91,7 @@ c2.metric("Matching records", f"{len(filtered):,}")
 c3.metric("Distinct sources", str(df["source"].nunique()))
 c4.metric("Records mentioning SIP", str(df["sip_evidence"].ne("No direct SIP evidence detected").sum()))
 
-tab1, tab2, tab3 = st.tabs(["Feedback Explorer", "Theme Overview", "Evidence & Validation"])
+tab1, tab2, tab3, tab4 = st.tabs(["Feedback Explorer", "Theme Overview", "Evidence & Validation", "SIP Research"])
 with tab1:
     st.subheader("Search results")
     if filtered.empty:
@@ -123,6 +124,79 @@ with tab3:
     st.dataframe(source_table, use_container_width=True, hide_index=True)
     st.markdown("**Next data collection gaps**")
     st.write("- Reddit discussions: the earlier collection attempt was blocked or returned no data.\n- YouTube: current entries are video leads, not comment text.\n- Direct SIP behaviour: public app reviews rarely establish whether a person continued a SIP for 12 months. Treat this as a research gap, not a variable we can infer.")
+
+
+with tab4:
+    st.subheader("SIP continuation research")
+    st.write(
+        "A separate evidence collection for exploring possible reasons investors pause, "
+        "stop, resume, or continue SIPs. This starter dataset contains preliminary source leads "
+        "and official product documentation, not a representative sample."
+    )
+
+    if SIP_RESEARCH_PATH.exists():
+        sip_df = pd.read_csv(SIP_RESEARCH_PATH).fillna("")
+        expected_cols = [
+            "source_id", "source_type", "source_url", "evidence_text",
+            "investor_status", "stated_reason", "theme_candidate",
+            "groww_mentioned", "evidence_type", "verification_status", "use_in_project"
+        ]
+        for col in expected_cols:
+            if col not in sip_df.columns:
+                sip_df[col] = ""
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Research records", len(sip_df))
+        m2.metric("Reddit leads", int(sip_df["source_type"].astype(str).str.contains("Reddit", case=False).sum()))
+        m3.metric("Official Groww documents", int(sip_df["source_type"].astype(str).str.contains("Official Groww", case=False).sum()))
+
+        source_choices = ["All"] + sorted(sip_df["source_type"].astype(str).unique().tolist())
+        selected_source_type = st.selectbox("Research source type", source_choices, key="sip_source_type")
+        if selected_source_type != "All":
+            sip_df = sip_df[sip_df["source_type"] == selected_source_type]
+
+        theme_choices = ["All"] + sorted(sip_df["theme_candidate"].astype(str).unique().tolist())
+        selected_research_theme = st.selectbox("Research theme", theme_choices, key="sip_research_theme")
+        if selected_research_theme != "All":
+            sip_df = sip_df[sip_df["theme_candidate"] == selected_research_theme]
+
+        groww_filter = st.selectbox(
+            "Groww explicitly mentioned?",
+            ["All", "Yes", "No", "Not established"],
+            key="sip_groww_filter"
+        )
+        if groww_filter != "All":
+            sip_df = sip_df[sip_df["groww_mentioned"].astype(str).str.lower() == groww_filter.lower()]
+
+        st.dataframe(
+            sip_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "source_url": st.column_config.LinkColumn("Source URL", display_text="Open source"),
+                "evidence_text": st.column_config.TextColumn("Evidence text", width="large"),
+                "use_in_project": st.column_config.TextColumn("Use in project", width="large"),
+                "verification_status": st.column_config.TextColumn("Verification status", width="large"),
+            }
+        )
+        st.download_button(
+            "Download SIP research CSV",
+            sip_df.to_csv(index=False).encode("utf-8"),
+            "groww_sip_research_filtered.csv",
+            "text/csv",
+            key="download_sip_research"
+        )
+        st.warning(
+            "Evidence quality warning: source leads and classifications are preliminary. "
+            "Verify original posts and comments before treating them as investor accounts. "
+            "Official help pages describe possible failure mechanisms but do not establish how common they are. "
+            "This dataset cannot calculate Groww's 12-month SIP retention."
+        )
+    else:
+        st.error(
+            "The file groww_sip_research_starter.csv was not found. "
+            "Upload it to the same repository folder as app.py."
+        )
 
 st.divider()
 st.caption("Built for discovery, not investment advice. No specific funds or stocks are recommended. No fear, FOMO, or urgency-based nudges are generated.")
