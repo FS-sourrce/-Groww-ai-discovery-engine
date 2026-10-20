@@ -55,11 +55,107 @@ def classify_sip(text):
 def has_term(text, term):
     return term.lower().strip() in str(text).lower() if term.strip() else True
 
+
+def extract_video_id(value):
+    """Accept a YouTube video ID or common YouTube URL formats."""
+    value = str(value).strip()
+    if not value:
+        return ""
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
+        return value
+    patterns = [
+        r"(?:youtube\.com/watch\?.*?[&?]v=)([A-Za-z0-9_-]{11})",
+        r"(?:youtu\.be/)([A-Za-z0-9_-]{11})",
+        r"(?:youtube\.com/shorts/)([A-Za-z0-9_-]{11})",
+        r"(?:youtube\.com/embed/)([A-Za-z0-9_-]{11})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def fetch_youtube_comments(video_ids, api_key, max_comments_each):
+    """Fetch public top-level comments using the official YouTube Data API."""
+    all_rows = []
+    errors = []
+    for video_id in video_ids:
+        page_token = None
+        fetched_for_video = 0
+        while fetched_for_video < max_comments_each:
+            batch_size = min(100, max_comments_each - fetched_for_video)
+            params = {
+                "part": "snippet",
+                "videoId": video_id,
+                "maxResults": batch_size,
+                "order": "time",
+                "textFormat": "plainText",
+                "key": api_key,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            try:
+                response = requests.get(
+                    "https://www.googleapis.com/youtube/v3/commentThreads",
+                    params=params,
+                    timeout=30,
+                )
+                if response.status_code != 200:
+                    try:
+                        detail = response.json().get("error", {}).get("message", response.text)
+                    except Exception:
+                        detail = response.text
+                    errors.append(f"{video_id}: HTTP {response.status_code}: {detail}")
+                    break
+                payload = response.json()
+                items = payload.get("items", [])
+                if not items:
+                    break
+                for item in items:
+                    snippet = item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
+                    all_rows.append({
+                        "source": "YouTube",
+                        "record_type": "YouTube comment",
+                        "title": snippet.get("videoId", video_id),
+                        "text": snippet.get("textDisplay", ""),
+                        "url": f"https://www.youtube.com/watch?v={video_id}",
+                        "date": snippet.get("publishedAt", ""),
+                        "author": snippet.get("authorDisplayName", ""),
+                        "rating": "",
+                        "comment_id": item.get("snippet", {}).get("topLevelComment", {}).get("id", ""),
+                        "video_id": video_id,
+                        "like_count": snippet.get("likeCount", 0),
+                        "search_blob": "",
+                        "theme": "",
+                        "sip_evidence": "",
+                    })
+                fetched_for_video += len(items)
+                page_token = payload.get("nextPageToken")
+                if not page_token:
+                    break
+            except Exception as exc:
+                errors.append(f"{video_id}: {exc}")
+                break
+    return pd.DataFrame(all_rows), errors
+
 try:
     df = load_data()
 except Exception as e:
     st.error(f"Could not load research_dataset.csv: {e}")
     st.stop()
+
+# Keep collected YouTube comments available during this app session and include them in AI search.
+if "youtube_comments_df" in st.session_state and not st.session_state["youtube_comments_df"].empty:
+    collected = st.session_state["youtube_comments_df"].copy()
+    for col in ["source", "record_type", "title", "text", "url", "date", "author", "rating"]:
+        if col not in collected.columns:
+            collected[col] = ""
+    collected["text"] = collected["text"].astype(str)
+    collected["search_blob"] = (collected["title"].astype(str) + " " + collected["text"].astype(str)).str.lower()
+    collected["theme"] = collected.apply(classify_theme, axis=1)
+    collected["sip_evidence"] = collected["text"].apply(classify_sip)
+    df = pd.concat([df, collected[df.columns]], ignore_index=True).drop_duplicates(subset=["url", "date", "text"], keep="first")
 
 st.title("Groww AI Discovery Engine")
 st.caption("Public feedback explorer | Early MVP | Exploratory classifications require human validation")
@@ -94,7 +190,7 @@ c2.metric("Matching records", f"{len(filtered):,}")
 c3.metric("Distinct sources", str(df["source"].nunique()))
 c4.metric("Records mentioning SIP", str(df["sip_evidence"].ne("No direct SIP evidence detected").sum()))
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["AI Search", "Feedback Explorer", "Theme Overview", "Evidence & Validation", "SIP Research"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["AI Search", "Feedback Explorer", "Theme Overview", "Evidence & Validation", "SIP Research", "YouTube Comments"])
 with tab1:
     st.subheader("Ask the research evidence")
     st.write("Ask a question in plain English. The engine retrieves relevant records from the loaded dataset and, when an API key is configured, drafts an AI answer grounded in those records.")
@@ -252,6 +348,86 @@ with tab5:
             "The file groww_sip_research_starter.csv was not found. "
             "Upload it to the same repository folder as app.py."
         )
+
+
+with tab6:
+    st.subheader("Collect public YouTube comments")
+    st.write("Paste relevant YouTube video links or 11-character video IDs, one per line. This uses the official YouTube Data API and collects top-level public comments only.")
+    st.caption("The API key is read from Streamlit Secrets as YOUTUBE_API_KEY. Never paste the key into the code or a public GitHub file.")
+    try:
+        youtube_key = st.secrets.get("YOUTUBE_API_KEY", "")
+    except Exception:
+        youtube_key = ""
+    if not youtube_key:
+        st.warning("Add YOUTUBE_API_KEY in Streamlit app settings → Secrets before collecting comments.")
+        st.code('YOUTUBE_API_KEY = "your_api_key_here"', language="toml")
+    video_input = st.text_area(
+        "YouTube video links or IDs",
+        placeholder="https://www.youtube.com/watch?v=XXXXXXXXXXX",
+        height=130,
+        key="youtube_video_input",
+    )
+    max_comments_each = st.selectbox(
+        "Maximum comments per video",
+        [50, 100, 200, 500],
+        index=1,
+        help="The API returns comments in batches of up to 100. Higher limits use more quota.",
+        key="youtube_max_comments",
+    )
+    if st.button("Collect comments", type="primary", key="collect_youtube_comments"):
+        video_ids = []
+        invalid_lines = []
+        for line in video_input.splitlines():
+            if not line.strip():
+                continue
+            video_id = extract_video_id(line)
+            if video_id:
+                if video_id not in video_ids:
+                    video_ids.append(video_id)
+            else:
+                invalid_lines.append(line.strip())
+        if not youtube_key:
+            st.error("No YOUTUBE_API_KEY found in Streamlit Secrets.")
+        elif not video_ids:
+            st.error("Paste at least one valid YouTube video URL or ID.")
+        else:
+            with st.spinner("Collecting comments from YouTube..."):
+                comments, errors = fetch_youtube_comments(video_ids, youtube_key, int(max_comments_each))
+            if not comments.empty:
+                old = st.session_state.get("youtube_comments_df", pd.DataFrame())
+                combined = pd.concat([old, comments], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["comment_id"], keep="first")
+                st.session_state["youtube_comments_df"] = combined
+                st.success(f"Collected {len(comments)} comments in this run. {len(combined)} unique comments are available in this session.")
+            else:
+                st.warning("No comments were collected. The video may have comments disabled, or the API key/project may not be configured correctly.")
+            for error in errors:
+                st.error(error)
+            if invalid_lines:
+                st.warning("Could not recognize these entries as YouTube links or video IDs: " + "; ".join(invalid_lines))
+    comments_now = st.session_state.get("youtube_comments_df", pd.DataFrame())
+    if not comments_now.empty:
+        st.markdown("#### Collected comments")
+        st.dataframe(
+            comments_now[["date", "author", "text", "url", "like_count"]].rename(
+                columns={"date":"Published", "author":"Author", "text":"Comment", "url":"Video", "like_count":"Likes"}
+            ),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Video": st.column_config.LinkColumn("Video", display_text="Open video"),
+                "Comment": st.column_config.TextColumn(width="large"),
+            },
+        )
+        st.download_button(
+            "Download collected YouTube comments CSV",
+            comments_now.to_csv(index=False).encode("utf-8-sig"),
+            "groww_youtube_comments.csv",
+            "text/csv",
+            key="download_youtube_comments",
+        )
+        st.info("These comments are also included in AI Search and Feedback Explorer for this app session. Download the CSV before refreshing or closing the app, then add it to the repository if you want the comments to persist across deployments.")
+    st.caption("Only publicly accessible top-level comments are collected. Replies are not included. Comments are qualitative evidence and do not establish actual SIP retention rates.")
 
 st.divider()
 st.caption("Built for discovery, not investment advice. No specific funds or stocks are recommended. No fear, FOMO, or urgency-based nudges are generated.")
