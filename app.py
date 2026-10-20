@@ -135,7 +135,7 @@ with tab1:
                     prompt = ("Answer the user's research question using ONLY the evidence below. Do not invent facts or claim the sample represents all Groww investors. Clearly distinguish direct evidence from cautious interpretation. If evidence is insufficient, say so. Cite evidence inline as [1], [2], etc., matching the numbered records.\n\nQuestion: " + question + "\n\nEvidence:\n" + "\n\n".join(context_parts))
                     try:
                         with st.spinner("Generating an evidence-grounded answer..."):
-                            response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model":"llama-3.3-70b-versatile", "messages":[{"role":"system","content":"You are a careful product research analyst. Never make up evidence, statistics, or citations."},{"role":"user","content":prompt}], "temperature":0.2}, timeout=45)
+                            response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model":"openai/gpt-oss-120b", "messages":[{"role":"system","content":"You are a careful product research analyst. Never make up evidence, statistics, or citations."},{"role":"user","content":prompt}], "temperature":0.2}, timeout=45)
                         response.raise_for_status()
                         answer = response.json()["choices"][0]["message"]["content"]
                         st.markdown("#### AI answer")
