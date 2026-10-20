@@ -1,0 +1,60 @@
+import streamlit as st
+import pandas as pd
+from pathlib import Path
+
+st.set_page_config(
+    page_title="Groww SIP Research",
+    layout="wide"
+)
+
+st.title("Groww SIP Research Explorer")
+st.write(
+    "Explore evidence about why investors continue, "
+    "pause, or stop systematic investment plans."
+)
+
+DATA_PATH = Path(__file__).parent / "groww_sip_research_starter.csv"
+
+@st.cache_data
+def load_research():
+    return pd.read_csv(DATA_PATH).fillna("")
+
+try:
+    df = load_research()
+
+    st.metric("Research records", len(df))
+
+    if "source_type" in df.columns:
+        sources = ["All"] + sorted(df["source_type"].unique().tolist())
+        selected_source = st.selectbox("Filter by source", sources)
+
+        if selected_source != "All":
+            df = df[df["source_type"] == selected_source]
+
+    if "theme_candidate" in df.columns:
+        themes = ["All"] + sorted(df["theme_candidate"].unique().tolist())
+        selected_theme = st.selectbox("Filter by theme", themes)
+
+        if selected_theme != "All":
+            df = df[df["theme_candidate"] == selected_theme]
+
+    st.subheader("Research evidence")
+    st.dataframe(df, use_container_width=True)
+
+    st.download_button(
+        "Download filtered research CSV",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name="groww_sip_research.csv",
+        mime="text/csv"
+    )
+
+    st.caption(
+        "Preliminary research only. Source leads and classifications "
+        "must be verified before being treated as findings."
+    )
+
+except FileNotFoundError:
+    st.error(
+        "Research CSV not found. Upload "
+        "groww_sip_research_starter.csv to the repository root."
+    )
