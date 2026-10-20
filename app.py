@@ -117,8 +117,9 @@ def search_youtube_videos(query, api_key, max_results=10):
     return pd.DataFrame(videos)
 
 
-def fetch_youtube_comments(video_ids, api_key, max_comments_each):
+def fetch_youtube_comments(video_ids, api_key, max_comments_each, video_title_map=None):
     """Fetch public top-level comments using the official YouTube Data API."""
+    video_title_map = video_title_map or {}
     all_rows = []
     errors = []
     for video_id in video_ids:
@@ -158,7 +159,7 @@ def fetch_youtube_comments(video_ids, api_key, max_comments_each):
                     all_rows.append({
                         "source": "YouTube",
                         "record_type": "YouTube comment",
-                        "title": snippet.get("videoId", video_id),
+                        "title": video_title_map.get(video_id, video_id),
                         "text": snippet.get("textDisplay", ""),
                         "url": f"https://www.youtube.com/watch?v={video_id}",
                         "date": snippet.get("publishedAt", ""),
@@ -242,9 +243,15 @@ with tab1:
         if not question.strip():
             st.warning("Enter a question first.")
         else:
-            corpus = (df["title"].fillna("").astype(str) + "\n" + df["text"].fillna("").astype(str)).tolist()
+            # Exclude placeholder video-lead records from answer evidence. They describe
+            # a search target, not what an investor actually said.
+            eligible = df.copy()
+            lead_mask = eligible["record_type"].astype(str).str.lower().str.contains("video lead|youtube video", regex=True)
+            eligible = eligible.loc[~lead_mask].copy()
+            eligible = eligible[eligible["text"].astype(str).str.strip().ne("")]
+            corpus = (eligible["title"].fillna("").astype(str) + "\n" + eligible["text"].fillna("").astype(str)).tolist()
             try:
-                vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=30000)
+                vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=30000, sublinear_tf=True)
                 matrix = vectorizer.fit_transform(corpus + [question])
                 scores = cosine_similarity(matrix[-1], matrix[:-1]).ravel()
                 ranked_idx = scores.argsort()[::-1]
@@ -254,7 +261,7 @@ with tab1:
             if not ranked_idx:
                 st.warning("No relevant evidence was found in the current dataset. Try a more specific or differently worded question.")
             else:
-                evidence = df.iloc[ranked_idx].copy()
+                evidence = eligible.iloc[ranked_idx].copy()
                 evidence["relevance_score"] = [round(float(scores[i]), 3) for i in ranked_idx]
                 st.markdown("#### Retrieved evidence")
                 show = evidence[["source", "title", "text", "url", "relevance_score"]].copy()
@@ -462,9 +469,10 @@ with tab6:
             else:
                 all_comments = []
                 all_errors = []
+                video_title_map = dict(zip(found["video_id"].astype(str), found["title"].astype(str)))
                 with st.spinner("Collecting comments..."):
                     for video_id in selected_video_ids:
-                        comments, errors = fetch_youtube_comments([video_id], youtube_key, int(max_comments_each))
+                        comments, errors = fetch_youtube_comments([video_id], youtube_key, int(max_comments_each), video_title_map)
                         if not comments.empty:
                             all_comments.append(comments)
                         all_errors.extend(errors)
