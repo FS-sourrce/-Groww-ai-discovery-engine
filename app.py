@@ -3,6 +3,9 @@ import re
 from pathlib import Path
 import pandas as pd
 import streamlit as st
+import requests
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 st.set_page_config(page_title="Groww AI Discovery Engine", page_icon="🔎", layout="wide")
 DATA_PATH = Path(__file__).parent / "research_dataset.csv"
@@ -91,8 +94,60 @@ c2.metric("Matching records", f"{len(filtered):,}")
 c3.metric("Distinct sources", str(df["source"].nunique()))
 c4.metric("Records mentioning SIP", str(df["sip_evidence"].ne("No direct SIP evidence detected").sum()))
 
-tab1, tab2, tab3, tab4 = st.tabs(["Feedback Explorer", "Theme Overview", "Evidence & Validation", "SIP Research"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["AI Search", "Feedback Explorer", "Theme Overview", "Evidence & Validation", "SIP Research"])
 with tab1:
+    st.subheader("Ask the research evidence")
+    st.write("Ask a question in plain English. The engine retrieves relevant records from the loaded dataset and, when an API key is configured, drafts an AI answer grounded in those records.")
+    question = st.text_input("Your research question", placeholder="Why might first-time investors pause or stop SIPs?", key="ai_search_question")
+    top_k = st.slider("Evidence records to retrieve", min_value=3, max_value=10, value=5, key="ai_top_k")
+    run_search = st.button("Search evidence", type="primary", key="run_ai_search")
+    if run_search:
+        if not question.strip():
+            st.warning("Enter a question first.")
+        else:
+            corpus = (df["title"].fillna("").astype(str) + "\n" + df["text"].fillna("").astype(str)).tolist()
+            try:
+                vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=30000)
+                matrix = vectorizer.fit_transform(corpus + [question])
+                scores = cosine_similarity(matrix[-1], matrix[:-1]).ravel()
+                ranked_idx = scores.argsort()[::-1]
+                ranked_idx = [i for i in ranked_idx if scores[i] > 0][:top_k]
+            except ValueError:
+                ranked_idx = []
+            if not ranked_idx:
+                st.warning("No relevant evidence was found in the current dataset. Try a more specific or differently worded question.")
+            else:
+                evidence = df.iloc[ranked_idx].copy()
+                evidence["relevance_score"] = [round(float(scores[i]), 3) for i in ranked_idx]
+                st.markdown("#### Retrieved evidence")
+                show = evidence[["source", "title", "text", "url", "relevance_score"]].copy()
+                st.dataframe(show.rename(columns={"source":"Source", "title":"Title", "text":"Evidence", "url":"Source URL", "relevance_score":"Relevance"}), use_container_width=True, hide_index=True, column_config={"Source URL": st.column_config.LinkColumn("Source URL", display_text="Open source"), "Evidence": st.column_config.TextColumn(width="large")})
+                try:
+                    api_key = st.secrets.get("GROQ_API_KEY", "")
+                except Exception:
+                    api_key = ""
+                if not api_key:
+                    api_key = st.text_input("Groq API key (optional, not saved)", type="password", key="groq_key_input", help="Add a Groq API key to generate a written answer. Without it, semantic retrieval still works.")
+                if api_key:
+                    context_parts = []
+                    for n, (_, row) in enumerate(evidence.iterrows(), start=1):
+                        context_parts.append(f"[{n}] Source: {row.get('source','')} | Title: {row.get('title','')} | URL: {row.get('url','')}\nEvidence: {str(row.get('text',''))[:2500]}")
+                    prompt = ("Answer the user's research question using ONLY the evidence below. Do not invent facts or claim the sample represents all Groww investors. Clearly distinguish direct evidence from cautious interpretation. If evidence is insufficient, say so. Cite evidence inline as [1], [2], etc., matching the numbered records.\n\nQuestion: " + question + "\n\nEvidence:\n" + "\n\n".join(context_parts))
+                    try:
+                        with st.spinner("Generating an evidence-grounded answer..."):
+                            response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model":"llama-3.3-70b-versatile", "messages":[{"role":"system","content":"You are a careful product research analyst. Never make up evidence, statistics, or citations."},{"role":"user","content":prompt}], "temperature":0.2}, timeout=45)
+                        response.raise_for_status()
+                        answer = response.json()["choices"][0]["message"]["content"]
+                        st.markdown("#### AI answer")
+                        st.markdown(answer)
+                    except Exception as exc:
+                        st.error("AI answer generation failed. Check that the API key is valid and try again. Retrieval results above are still available.")
+                        st.caption(f"Technical detail: {exc}")
+                else:
+                    st.info("Semantic retrieval is working. To generate written AI answers, add a Groq API key in Streamlit Secrets as GROQ_API_KEY, or enter one above for this session.")
+                st.caption("Method note: TF-IDF semantic-style retrieval ranks textual similarity; it is not an embedding model. Results are exploratory and must be checked against original sources. Public discussions cannot establish Groww's actual 12-month SIP retention rate.")
+
+with tab2:
     st.subheader("Search results")
     if filtered.empty:
         st.warning("No matching records. Try a broader search or remove a filter.")
@@ -101,7 +156,7 @@ with tab1:
         st.dataframe(filtered[show_cols].rename(columns={"source":"Source", "record_type":"Record type", "date":"Date", "rating":"Rating", "theme":"Candidate theme", "sip_evidence":"SIP evidence label", "title":"Title", "text":"Original feedback", "url":"Source URL"}), use_container_width=True, hide_index=True, column_config={"Source URL": st.column_config.LinkColumn("Source URL", display_text="Open source"), "Original feedback": st.column_config.TextColumn(width="large")})
         st.download_button("Download filtered evidence (CSV)", filtered[show_cols].to_csv(index=False).encode("utf-8"), "groww_filtered_evidence.csv", "text/csv")
         st.caption("Candidate themes and SIP labels are heuristic suggestions, not validated AI findings.")
-with tab2:
+with tab3:
     st.subheader("What appears in this dataset")
     theme_counts = filtered["theme"].value_counts().rename_axis("Candidate theme").reset_index(name="Records")
     if not theme_counts.empty:
@@ -111,7 +166,7 @@ with tab2:
     sip_counts = filtered["sip_evidence"].value_counts().rename_axis("Label").reset_index(name="Records")
     st.dataframe(sip_counts, use_container_width=True, hide_index=True)
     st.warning("Counts describe this collected sample only. They are not population estimates, retention rates, or proof of causation. Reviews may be about trading or app performance rather than mutual fund SIPs.")
-with tab3:
+with tab4:
     st.subheader("Evidence quality and validation")
     st.markdown("**Current limitation:** the candidate theme and SIP labels are generated with transparent keyword rules. They are not a validated LLM workflow yet.")
     st.markdown("**Human validation workflow**")
@@ -126,7 +181,7 @@ with tab3:
     st.write("- Reddit discussions: the earlier collection attempt was blocked or returned no data.\n- YouTube: current entries are video leads, not comment text.\n- Direct SIP behaviour: public app reviews rarely establish whether a person continued a SIP for 12 months. Treat this as a research gap, not a variable we can infer.")
 
 
-with tab4:
+with tab5:
     st.subheader("SIP continuation research")
     st.write(
         "A separate evidence collection for exploring possible reasons investors pause, "
