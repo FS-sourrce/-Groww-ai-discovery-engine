@@ -76,6 +76,47 @@ def extract_video_id(value):
     return ""
 
 
+def search_youtube_videos(query, api_key, max_results=10):
+    """Search public YouTube videos with the official YouTube Data API."""
+    params = {
+        "part": "snippet",
+        "q": query,
+        "type": "video",
+        "maxResults": max(1, min(int(max_results), 50)),
+        "order": "relevance",
+        "regionCode": "IN",
+        "relevanceLanguage": "en",
+        "key": api_key,
+    }
+    response = requests.get(
+        "https://www.googleapis.com/youtube/v3/search",
+        params=params,
+        timeout=30,
+    )
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("error", {}).get("message", response.text)
+        except Exception:
+            detail = response.text
+        raise RuntimeError(f"YouTube search failed (HTTP {response.status_code}): {detail}")
+    payload = response.json()
+    videos = []
+    for item in payload.get("items", []):
+        snippet = item.get("snippet", {})
+        video_id = item.get("id", {}).get("videoId", "")
+        if not video_id:
+            continue
+        videos.append({
+            "video_id": video_id,
+            "title": snippet.get("title", ""),
+            "channel": snippet.get("channelTitle", ""),
+            "published_at": snippet.get("publishedAt", ""),
+            "description": snippet.get("description", ""),
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+        })
+    return pd.DataFrame(videos)
+
+
 def fetch_youtube_comments(video_ids, api_key, max_comments_each):
     """Fetch public top-level comments using the official YouTube Data API."""
     all_rows = []
@@ -351,63 +392,98 @@ with tab5:
 
 
 with tab6:
-    st.subheader("Collect public YouTube comments")
-    st.write("Paste relevant YouTube video links or 11-character video IDs, one per line. This uses the official YouTube Data API and collects top-level public comments only.")
-    st.caption("The API key is read from Streamlit Secrets as YOUTUBE_API_KEY. Never paste the key into the code or a public GitHub file.")
+    st.subheader("Find videos and collect public YouTube comments")
+    st.write("Search for relevant videos, select the ones you want, and collect their public top-level comments.")
+    st.caption("Uses the official YouTube Data API. The key is read from Streamlit Secrets as YOUTUBE_API_KEY.")
     try:
         youtube_key = st.secrets.get("YOUTUBE_API_KEY", "")
     except Exception:
         youtube_key = ""
     if not youtube_key:
-        st.warning("Add YOUTUBE_API_KEY in Streamlit app settings → Secrets before collecting comments.")
+        st.warning("Add YOUTUBE_API_KEY in Streamlit app settings → Secrets before using YouTube tools.")
         st.code('YOUTUBE_API_KEY = "your_api_key_here"', language="toml")
-    video_input = st.text_area(
-        "YouTube video links or IDs",
-        placeholder="https://www.youtube.com/watch?v=XXXXXXXXXXX",
-        height=130,
-        key="youtube_video_input",
+
+    query = st.text_input(
+        "Search YouTube videos",
+        value="Groww SIP mutual fund investor experience",
+        key="youtube_search_query",
+        placeholder="e.g. why people stop SIP mutual funds India",
     )
-    max_comments_each = st.selectbox(
-        "Maximum comments per video",
-        [50, 100, 200, 500],
-        index=1,
-        help="The API returns comments in batches of up to 100. Higher limits use more quota.",
-        key="youtube_max_comments",
-    )
-    if st.button("Collect comments", type="primary", key="collect_youtube_comments"):
-        video_ids = []
-        invalid_lines = []
-        for line in video_input.splitlines():
-            if not line.strip():
-                continue
-            video_id = extract_video_id(line)
-            if video_id:
-                if video_id not in video_ids:
-                    video_ids.append(video_id)
-            else:
-                invalid_lines.append(line.strip())
+    search_limit = st.selectbox("Videos to find", [5, 10, 20, 25], index=1, key="youtube_search_limit")
+    if st.button("Search videos", type="primary", key="search_youtube_videos"):
         if not youtube_key:
             st.error("No YOUTUBE_API_KEY found in Streamlit Secrets.")
-        elif not video_ids:
-            st.error("Paste at least one valid YouTube video URL or ID.")
+        elif not query.strip():
+            st.error("Enter a search phrase.")
         else:
-            with st.spinner("Collecting comments from YouTube..."):
-                comments, errors = fetch_youtube_comments(video_ids, youtube_key, int(max_comments_each))
-            if not comments.empty:
-                old = st.session_state.get("youtube_comments_df", pd.DataFrame())
-                combined = pd.concat([old, comments], ignore_index=True)
-                combined = combined.drop_duplicates(subset=["comment_id"], keep="first")
-                st.session_state["youtube_comments_df"] = combined
-                st.success(f"Collected {len(comments)} comments in this run. {len(combined)} unique comments are available in this session.")
+            try:
+                with st.spinner("Searching YouTube..."):
+                    found = search_youtube_videos(query.strip(), youtube_key, search_limit)
+                st.session_state["youtube_found_videos"] = found
+                if found.empty:
+                    st.info("No videos found for that query.")
+                else:
+                    st.success(f"Found {len(found)} videos.")
+            except Exception as exc:
+                st.error(str(exc))
+
+    found = st.session_state.get("youtube_found_videos", pd.DataFrame())
+    selected_video_ids = []
+    if not found.empty:
+        st.markdown("#### Search results")
+        display = found.copy()
+        display["select"] = False
+        edited = st.data_editor(
+            display[["select", "title", "channel", "published_at", "url"]],
+            use_container_width=True,
+            hide_index=True,
+            disabled=["title", "channel", "published_at", "url"],
+            column_config={
+                "select": st.column_config.CheckboxColumn("Collect comments?", default=False),
+                "title": st.column_config.TextColumn("Video title", width="large"),
+                "url": st.column_config.LinkColumn("Video link", display_text="Open video"),
+            },
+            key="youtube_video_selection",
+        )
+        selected_video_ids = found.loc[edited["select"].fillna(False).values, "video_id"].tolist()
+
+        st.caption("Select one or more videos in the first column, then collect comments.")
+        max_comments_each = st.selectbox(
+            "Maximum comments per selected video",
+            [50, 100, 200, 500],
+            index=1,
+            key="youtube_max_comments",
+        )
+        if st.button("Collect comments from selected videos", type="primary", key="collect_selected_youtube"):
+            if not selected_video_ids:
+                st.error("Select at least one video first.")
+            elif not youtube_key:
+                st.error("No YOUTUBE_API_KEY found in Streamlit Secrets.")
             else:
-                st.warning("No comments were collected. The video may have comments disabled, or the API key/project may not be configured correctly.")
-            for error in errors:
-                st.error(error)
-            if invalid_lines:
-                st.warning("Could not recognize these entries as YouTube links or video IDs: " + "; ".join(invalid_lines))
+                all_comments = []
+                all_errors = []
+                with st.spinner("Collecting comments..."):
+                    for video_id in selected_video_ids:
+                        comments, errors = fetch_youtube_comments([video_id], youtube_key, int(max_comments_each))
+                        if not comments.empty:
+                            all_comments.append(comments)
+                        all_errors.extend(errors)
+                if all_comments:
+                    collected = pd.concat(all_comments, ignore_index=True)
+                    old = st.session_state.get("youtube_comments_df", pd.DataFrame())
+                    combined = pd.concat([old, collected], ignore_index=True)
+                    combined = combined.drop_duplicates(subset=["comment_id"], keep="first")
+                    st.session_state["youtube_comments_df"] = combined
+                    st.success(f"Collected {len(collected)} comments in this run. {len(combined)} unique comments are available in this session.")
+                else:
+                    st.warning("No comments collected. Comments may be disabled, or the API may be restricted.")
+                for error in all_errors:
+                    st.error(error)
+
+    st.markdown("---")
+    st.markdown("#### Collected comments")
     comments_now = st.session_state.get("youtube_comments_df", pd.DataFrame())
     if not comments_now.empty:
-        st.markdown("#### Collected comments")
         st.dataframe(
             comments_now[["date", "author", "text", "url", "like_count"]].rename(
                 columns={"date":"Published", "author":"Author", "text":"Comment", "url":"Video", "like_count":"Likes"}
@@ -426,8 +502,10 @@ with tab6:
             "text/csv",
             key="download_youtube_comments",
         )
-        st.info("These comments are also included in AI Search and Feedback Explorer for this app session. Download the CSV before refreshing or closing the app, then add it to the repository if you want the comments to persist across deployments.")
-    st.caption("Only publicly accessible top-level comments are collected. Replies are not included. Comments are qualitative evidence and do not establish actual SIP retention rates.")
+        st.info("Collected comments are also included in AI Search and Feedback Explorer for this app session. Download the CSV before closing the app to preserve the collection.")
+    else:
+        st.info("No comments collected yet. Search videos above, select relevant results, then collect comments.")
+    st.caption("Only public top-level comments are collected. Replies are not included. Search results are leads, not proof of investor retention or churn.")
 
 st.divider()
 st.caption("Built for discovery, not investment advice. No specific funds or stocks are recommended. No fear, FOMO, or urgency-based nudges are generated.")
