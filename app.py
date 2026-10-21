@@ -237,6 +237,32 @@ with tab1:
     st.subheader("Ask the research evidence")
     st.write("Ask a question in plain English. The engine retrieves relevant records from the loaded dataset and, when an API key is configured, drafts an AI answer grounded in those records.")
     question = st.text_input("Your research question", placeholder="Why might first-time investors pause or stop SIPs?", key="ai_search_question")
+    uploaded_comments = st.file_uploader(
+        "Load previously collected YouTube comments (CSV)",
+        type=["csv"],
+        key="ai_comments_csv_upload",
+        help="Upload the CSV exported from the YouTube Comments tab. This keeps comments available after a refresh."
+    )
+    if uploaded_comments is not None:
+        try:
+            uploaded_df = pd.read_csv(uploaded_comments).fillna("")
+            if "text" not in uploaded_df.columns and "Comment" in uploaded_df.columns:
+                uploaded_df = uploaded_df.rename(columns={"Comment": "text"})
+            if "text" in uploaded_df.columns:
+                for col, default in {"source":"YouTube", "record_type":"YouTube comment", "title":"YouTube comment", "url":"", "date":"", "author":"", "rating":""}.items():
+                    if col not in uploaded_df.columns:
+                        uploaded_df[col] = default
+                uploaded_df["source"] = uploaded_df["source"].replace("", "YouTube")
+                uploaded_df["record_type"] = uploaded_df["record_type"].replace("", "YouTube comment")
+                uploaded_df["title"] = uploaded_df["title"].replace("", "YouTube comment")
+                uploaded_df["text"] = uploaded_df["text"].astype(str)
+                uploaded_df = uploaded_df[uploaded_df["text"].str.strip().ne("")]
+                st.session_state["youtube_comments_df"] = uploaded_df
+                st.success(f"Loaded {len(uploaded_df)} comments for this session. Run your search again.")
+            else:
+                st.error("This CSV has no comment text column.")
+        except Exception as exc:
+            st.error(f"Could not read the comments CSV: {exc}")
     top_k = st.slider("Evidence records to retrieve", min_value=3, max_value=10, value=5, key="ai_top_k")
     run_search = st.button("Search evidence", type="primary", key="run_ai_search")
     if run_search:
@@ -249,6 +275,12 @@ with tab1:
             lead_mask = eligible["record_type"].astype(str).str.lower().str.contains("video lead|youtube video", regex=True)
             eligible = eligible.loc[~lead_mask].copy()
             eligible = eligible[eligible["text"].astype(str).str.strip().ne("")]
+            # Exclude metadata-only YouTube records accidentally labeled as ordinary evidence.
+            placeholder_mask = (
+                eligible["title"].astype(str).str.lower().str.startswith("video lead for:")
+                | eligible["record_type"].astype(str).str.lower().str.contains("youtube video lead", regex=False)
+            )
+            eligible = eligible.loc[~placeholder_mask].copy()
             corpus = (eligible["title"].fillna("").astype(str) + "\n" + eligible["text"].fillna("").astype(str)).tolist()
             try:
                 vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=30000, sublinear_tf=True)
