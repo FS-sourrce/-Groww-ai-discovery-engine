@@ -224,9 +224,10 @@ with st.expander("Load your collected YouTube comments CSV", expanded=False):
     if uploaded_comments is not None:
         try:
             upload_df = pd.read_csv(uploaded_comments).fillna("")
-            # Normalize common column names from the comment collector.
-            aliases = {"comment": "text", "comment_text": "text", "video_title": "title", "published_at": "date", "video_url": "url", "channel_title": "author"}
-            upload_df = upload_df.rename(columns={c: aliases.get(str(c).strip().lower(), c) for c in upload_df.columns})
+            # Normalize headers case-insensitively, then map common comment-export names.
+            upload_df.columns = [str(c).strip().lower() for c in upload_df.columns]
+            aliases = {"comment": "text", "comment_text": "text", "text_original": "text", "video_title": "title", "published_at": "date", "publishedat": "date", "video_url": "url", "channel_title": "author", "channel": "author", "video_id": "video_id"}
+            upload_df = upload_df.rename(columns={c: aliases.get(c, c) for c in upload_df.columns})
             for col, default in {"source":"YouTube", "record_type":"YouTube comment", "title":"", "text":"", "url":"", "date":"", "author":"", "rating":""}.items():
                 if col not in upload_df.columns: upload_df[col] = default
             upload_df["source"] = upload_df["source"].replace("", "YouTube")
@@ -259,12 +260,14 @@ if query.strip():
     else:
         filtered["search_score"] = 0
 
-# Compact overview metrics
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Records in dataset", f"{len(df):,}")
-c2.metric("Matching records", f"{len(filtered):,}")
-c3.metric("Distinct sources", str(df["source"].nunique()))
-c4.metric("Records mentioning SIP", str(df["sip_evidence"].ne("No direct SIP evidence detected").sum()))
+# Keep the home page focused. These counts describe the currently loaded sample,
+# not all investors; filtered records are only meaningful after a search/filter is applied.
+with st.expander("Dataset status", expanded=False):
+    st.write(f"Loaded records: {len(df):,}")
+    st.write(f"Records after current filters: {len(filtered):,}")
+    nonempty_sources = df.loc[df["source"].astype(str).str.strip().ne(""), "source"]
+    st.write(f"Source types represented: {nonempty_sources.nunique()}")
+    st.caption("These are dataset counts, not investor counts or SIP-retention statistics. Use Search to retrieve evidence relevant to a specific question.")
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Search", "Explore Feedback", "Investor Insights", "Data Quality", "SIP Research", "Collect Data"])
 with tab1:
