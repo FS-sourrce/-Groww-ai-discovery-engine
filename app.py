@@ -22,6 +22,18 @@ def normalize_frame(df, default_source="Research dataset"):
     df["title"] = df["title"].astype(str)
     df["text"] = df["text"].astype(str)
     df = df[df["text"].str.strip().ne("")].copy()
+
+    # Exclude old discovery placeholders that are not actual evidence.
+    title_lower = df["title"].str.lower()
+    text_lower = df["text"].str.lower()
+    placeholder_title = title_lower.str.contains(
+        r"video lead for:|youtube video lead|comments on .* not collected", regex=True, na=False
+    )
+    placeholder_text = text_lower.str.contains(
+        r"comments were not collected|comment data were not provided|video discovered through search|comments not collected|content is unavailable",
+        regex=True, na=False
+    )
+    df = df[~(placeholder_title | placeholder_text)].copy()
     return df
 
 @st.cache_data
@@ -135,10 +147,24 @@ if run:
         else: source_status.append(("YouTube public comments",0,"Not configured: add YOUTUBE_API_KEY"))
     all_data=pd.concat(parts,ignore_index=True,sort=False).fillna("") if parts else pd.DataFrame()
     if not all_data.empty:
+        # Never count placeholder records as evidence, even if their record_type is mislabeled.
+        title_lower = all_data["title"].astype(str).str.lower()
+        text_lower = all_data["text"].astype(str).str.lower()
+        fake_title = title_lower.str.contains(r"video lead for:|youtube video lead", regex=True, na=False)
+        fake_text = text_lower.str.contains(
+            r"comments were not collected|comment data were not provided|video discovered through search|comments not collected|content is unavailable",
+            regex=True, na=False
+        )
+        all_data = all_data[~(fake_title | fake_text)].copy()
         all_data=all_data.drop_duplicates(subset=[c for c in ["source","url","date","text"] if c in all_data.columns],keep="first")
     evidence=retrieve(question.strip(),all_data,10) if not all_data.empty else pd.DataFrame()
     st.session_state["last_source_status"]=source_status
     st.session_state["last_evidence"]=evidence
+    with st.expander("Search status: what was actually collected", expanded=True):
+        st.dataframe(
+            pd.DataFrame(source_status, columns=["Source","Records collected","Status"]),
+            use_container_width=True, hide_index=True
+        )
     if evidence.empty:
         st.warning("No relevant evidence was retrieved. Check the source configuration or try a more specific question.")
     else:
