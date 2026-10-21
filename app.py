@@ -159,7 +159,7 @@ def fetch_youtube_comments(video_ids, api_key, max_comments_each, video_title_ma
                     all_rows.append({
                         "source": "YouTube",
                         "record_type": "YouTube comment",
-                        "title": video_title_map.get(video_id, video_id),
+                        "title": video_title_map.get(video_id, "YouTube video"),
                         "text": snippet.get("textDisplay", ""),
                         "url": f"https://www.youtube.com/watch?v={video_id}",
                         "date": snippet.get("publishedAt", ""),
@@ -197,11 +197,45 @@ if "youtube_comments_df" in st.session_state and not st.session_state["youtube_c
     collected["search_blob"] = (collected["title"].astype(str) + " " + collected["text"].astype(str)).str.lower()
     collected["theme"] = collected.apply(classify_theme, axis=1)
     collected["sip_evidence"] = collected["text"].apply(classify_sip)
-    df = pd.concat([df, collected[df.columns]], ignore_index=True).drop_duplicates(subset=["url", "date", "text"], keep="first")
+    # Align schemas safely before combining base data and collected/uploaded comments.
+    all_columns = list(dict.fromkeys(list(df.columns) + list(collected.columns)))
+    df = df.reindex(columns=all_columns)
+    collected = collected.reindex(columns=all_columns)
+    df = pd.concat([df, collected], ignore_index=True, sort=False).fillna("")
+    df = df.drop_duplicates(subset=[c for c in ["url", "date", "text"] if c in df.columns], keep="first")
 
-st.title("Groww AI Discovery Engine")
-st.caption("Public feedback explorer | Early MVP | Exploratory classifications require human validation")
-st.info("Evidence boundary: app reviews can reveal product friction, but they do not prove why an investor continued or stopped a SIP. YouTube video leads are not comments. This prototype does not calculate actual 12-month SIP retention.")
+# Compact, research-first visual design
+st.markdown("""
+<style>
+.block-container {max-width: 1180px; padding-top: 1.8rem; padding-bottom: 3rem;}
+.hero {padding: 1.5rem 1.6rem; border: 1px solid rgba(128,128,128,.25); border-radius: 18px; margin-bottom: 1.2rem;}
+.hero h1 {font-size: clamp(2rem, 5vw, 3.1rem); line-height: 1.1; margin: 0 0 .6rem 0;}
+.hero p {font-size: 1.05rem; opacity: .78; margin: 0;}
+.small-note {font-size: .88rem; opacity: .75;}
+[data-testid="stMetric"] {padding: .8rem; border: 1px solid rgba(128,128,128,.2); border-radius: 12px;}
+</style>
+<div class="hero"><h1>Groww AI Discovery Engine</h1><p>Explore public investor feedback. Find evidence. Understand recurring friction.</p></div>
+""", unsafe_allow_html=True)
+with st.expander("Evidence limitations", expanded=False):
+    st.write("App reviews can reveal product friction but do not prove why an investor continued or stopped a SIP. YouTube video titles are research leads, not comments. This prototype does not calculate actual 12-month SIP retention.")
+
+with st.expander("Load your collected YouTube comments CSV", expanded=False):
+    uploaded_comments = st.file_uploader("Upload groww_youtube_comments.csv", type=["csv"], key="comments_csv_upload")
+    if uploaded_comments is not None:
+        try:
+            upload_df = pd.read_csv(uploaded_comments).fillna("")
+            # Normalize common column names from the comment collector.
+            aliases = {"comment": "text", "comment_text": "text", "video_title": "title", "published_at": "date", "video_url": "url", "channel_title": "author"}
+            upload_df = upload_df.rename(columns={c: aliases.get(str(c).strip().lower(), c) for c in upload_df.columns})
+            for col, default in {"source":"YouTube", "record_type":"YouTube comment", "title":"", "text":"", "url":"", "date":"", "author":"", "rating":""}.items():
+                if col not in upload_df.columns: upload_df[col] = default
+            upload_df["source"] = upload_df["source"].replace("", "YouTube")
+            upload_df["record_type"] = upload_df["record_type"].replace("", "YouTube comment")
+            upload_df = upload_df[upload_df["text"].astype(str).str.strip().ne("")].copy()
+            st.session_state["youtube_comments_df"] = upload_df
+            st.success(f"Loaded {len(upload_df):,} comments. They will be included in search for this session.")
+        except Exception as exc:
+            st.error(f"Could not read this CSV: {exc}")
 
 with st.sidebar:
     st.header("Explore feedback")
@@ -225,44 +259,18 @@ if query.strip():
     else:
         filtered["search_score"] = 0
 
-# Top-level metrics
+# Compact overview metrics
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Records in dataset", f"{len(df):,}")
 c2.metric("Matching records", f"{len(filtered):,}")
 c3.metric("Distinct sources", str(df["source"].nunique()))
 c4.metric("Records mentioning SIP", str(df["sip_evidence"].ne("No direct SIP evidence detected").sum()))
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["AI Search", "Feedback Explorer", "Theme Overview", "Evidence & Validation", "SIP Research", "YouTube Comments"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Search", "Explore Feedback", "Investor Insights", "Data Quality", "SIP Research", "Collect Data"])
 with tab1:
-    st.subheader("Ask the research evidence")
-    st.write("Ask a question in plain English. The engine retrieves relevant records from the loaded dataset and, when an API key is configured, drafts an AI answer grounded in those records.")
+    st.subheader("Ask a research question")
+    st.write("Search the available evidence and generate an answer grounded in retrieved records.")
     question = st.text_input("Your research question", placeholder="Why might first-time investors pause or stop SIPs?", key="ai_search_question")
-    uploaded_comments = st.file_uploader(
-        "Load previously collected YouTube comments (CSV)",
-        type=["csv"],
-        key="ai_comments_csv_upload",
-        help="Upload the CSV exported from the YouTube Comments tab. This keeps comments available after a refresh."
-    )
-    if uploaded_comments is not None:
-        try:
-            uploaded_df = pd.read_csv(uploaded_comments).fillna("")
-            if "text" not in uploaded_df.columns and "Comment" in uploaded_df.columns:
-                uploaded_df = uploaded_df.rename(columns={"Comment": "text"})
-            if "text" in uploaded_df.columns:
-                for col, default in {"source":"YouTube", "record_type":"YouTube comment", "title":"YouTube comment", "url":"", "date":"", "author":"", "rating":""}.items():
-                    if col not in uploaded_df.columns:
-                        uploaded_df[col] = default
-                uploaded_df["source"] = uploaded_df["source"].replace("", "YouTube")
-                uploaded_df["record_type"] = uploaded_df["record_type"].replace("", "YouTube comment")
-                uploaded_df["title"] = uploaded_df["title"].replace("", "YouTube comment")
-                uploaded_df["text"] = uploaded_df["text"].astype(str)
-                uploaded_df = uploaded_df[uploaded_df["text"].str.strip().ne("")]
-                st.session_state["youtube_comments_df"] = uploaded_df
-                st.success(f"Loaded {len(uploaded_df)} comments for this session. Run your search again.")
-            else:
-                st.error("This CSV has no comment text column.")
-        except Exception as exc:
-            st.error(f"Could not read the comments CSV: {exc}")
     top_k = st.slider("Evidence records to retrieve", min_value=3, max_value=10, value=5, key="ai_top_k")
     run_search = st.button("Search evidence", type="primary", key="run_ai_search")
     if run_search:
@@ -272,28 +280,9 @@ with tab1:
             # Exclude placeholder video-lead records from answer evidence. They describe
             # a search target, not what an investor actually said.
             eligible = df.copy()
-            # Include comments uploaded by the user or collected in this session.
-            session_comments = st.session_state.get("youtube_comments_df", pd.DataFrame())
-            if isinstance(session_comments, pd.DataFrame) and not session_comments.empty:
-                comments_for_search = session_comments.copy()
-                for col, default in {"source":"YouTube", "record_type":"YouTube comment", "title":"YouTube comment", "text":"", "url":"", "date":"", "theme":"Unclassified", "sip_evidence":"Potential SIP evidence", "rating":"", "author":""}.items():
-                    if col not in comments_for_search.columns:
-                        comments_for_search[col] = default
-                comments_for_search["source"] = comments_for_search["source"].replace("", "YouTube")
-                comments_for_search["record_type"] = comments_for_search["record_type"].replace("", "YouTube comment")
-                comments_for_search["title"] = comments_for_search["title"].replace("", "YouTube comment")
-                comments_for_search["text"] = comments_for_search["text"].astype(str)
-                comments_for_search = comments_for_search[comments_for_search["text"].str.strip().ne("")]
-                eligible = pd.concat([eligible, comments_for_search], ignore_index=True, sort=False)
             lead_mask = eligible["record_type"].astype(str).str.lower().str.contains("video lead|youtube video", regex=True)
             eligible = eligible.loc[~lead_mask].copy()
             eligible = eligible[eligible["text"].astype(str).str.strip().ne("")]
-            # Exclude metadata-only YouTube records accidentally labeled as ordinary evidence.
-            placeholder_mask = (
-                eligible["title"].astype(str).str.lower().str.startswith("video lead for:")
-                | eligible["record_type"].astype(str).str.lower().str.contains("youtube video lead", regex=False)
-            )
-            eligible = eligible.loc[~placeholder_mask].copy()
             corpus = (eligible["title"].fillna("").astype(str) + "\n" + eligible["text"].fillna("").astype(str)).tolist()
             try:
                 vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=30000, sublinear_tf=True)
@@ -524,9 +513,7 @@ with tab6:
                 if all_comments:
                     collected = pd.concat(all_comments, ignore_index=True)
                     old = st.session_state.get("youtube_comments_df", pd.DataFrame())
-                    # Align columns before concatenation; the existing session may be empty
-                    # or have a different schema from the newly collected comment rows.
-                    combined = pd.concat([old, collected], ignore_index=True, sort=False)
+                    combined = pd.concat([old, collected], ignore_index=True)
                     combined = combined.drop_duplicates(subset=["comment_id"], keep="first")
                     st.session_state["youtube_comments_df"] = combined
                     st.success(f"Collected {len(collected)} comments in this run. {len(combined)} unique comments are available in this session.")
