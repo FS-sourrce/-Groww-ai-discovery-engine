@@ -22,18 +22,6 @@ def normalize_frame(df, default_source="Research dataset"):
     df["title"] = df["title"].astype(str)
     df["text"] = df["text"].astype(str)
     df = df[df["text"].str.strip().ne("")].copy()
-
-    # Exclude old discovery placeholders that are not actual evidence.
-    title_lower = df["title"].str.lower()
-    text_lower = df["text"].str.lower()
-    placeholder_title = title_lower.str.contains(
-        r"video lead for:|youtube video lead|comments on .* not collected", regex=True, na=False
-    )
-    placeholder_text = text_lower.str.contains(
-        r"comments were not collected|comment data were not provided|video discovered through search|comments not collected|content is unavailable",
-        regex=True, na=False
-    )
-    df = df[~(placeholder_title | placeholder_text)].copy()
     return df
 
 @st.cache_data
@@ -85,11 +73,30 @@ def get_youtube_comments(videos, api_key, per_video=30):
             errors.append(f"{video['title']}: {exc}")
     return pd.DataFrame(rows), errors
 
-def retrieve(question, data, top_k=10):
+GENERIC_COMMENT_PATTERNS = [
+    r"^(thank you|thankyou|thanks|thank u|thanks sir|thanks bro|thank you sir)[!.\s🙏😊❤️😭🎉]*$",
+    r"^(excellent|good|great|nice|super|very good|nice video|good video)[!.\s😊❤️🎉]*$",
+    r"^[🙏😊❤️😍🥰👏🎉👍🔥💯\s]+$",
+]
+
+def is_low_information_comment(text):
+    value = re.sub(r"\s+", " ", str(text)).strip().lower()
+    if not value:
+        return True
+    if len(value) < 12 and not re.search(r"\b(sip|pause|stop|cancel|restart|start|payment|mandate|groww|loss|market|return|refund)\b", value):
+        return True
+    return any(re.fullmatch(pattern, value, flags=re.IGNORECASE) for pattern in GENERIC_COMMENT_PATTERNS)
+
+def retrieve(question, data, top_k=20):
     data=data.copy()
     data=data[data["text"].astype(str).str.strip().ne("")]
     # Video-only discovery rows are not evidence; comments are evidence.
     data=data[~data["record_type"].astype(str).str.lower().str.contains("video lead|youtube video",regex=True)]
+    # Remove low-information YouTube reactions, while preserving practical questions about SIP actions.
+    yt_mask=data["source"].astype(str).str.lower().str.contains("youtube comments|youtube public comments",regex=True)
+    if yt_mask.any():
+        keep = ~data.loc[yt_mask, "text"].map(is_low_information_comment)
+        data = pd.concat([data.loc[~yt_mask], data.loc[yt_mask].loc[keep.index[keep]]], ignore_index=True, sort=False)
     if data.empty: return data
     corpus=(data["title"].astype(str)+"\n"+data["text"].astype(str)).tolist()
     try:
@@ -147,24 +154,10 @@ if run:
         else: source_status.append(("YouTube public comments",0,"Not configured: add YOUTUBE_API_KEY"))
     all_data=pd.concat(parts,ignore_index=True,sort=False).fillna("") if parts else pd.DataFrame()
     if not all_data.empty:
-        # Never count placeholder records as evidence, even if their record_type is mislabeled.
-        title_lower = all_data["title"].astype(str).str.lower()
-        text_lower = all_data["text"].astype(str).str.lower()
-        fake_title = title_lower.str.contains(r"video lead for:|youtube video lead", regex=True, na=False)
-        fake_text = text_lower.str.contains(
-            r"comments were not collected|comment data were not provided|video discovered through search|comments not collected|content is unavailable",
-            regex=True, na=False
-        )
-        all_data = all_data[~(fake_title | fake_text)].copy()
         all_data=all_data.drop_duplicates(subset=[c for c in ["source","url","date","text"] if c in all_data.columns],keep="first")
-    evidence=retrieve(question.strip(),all_data,10) if not all_data.empty else pd.DataFrame()
+    evidence=retrieve(question.strip(),all_data,20) if not all_data.empty else pd.DataFrame()
     st.session_state["last_source_status"]=source_status
     st.session_state["last_evidence"]=evidence
-    with st.expander("Search status: what was actually collected", expanded=True):
-        st.dataframe(
-            pd.DataFrame(source_status, columns=["Source","Records collected","Status"]),
-            use_container_width=True, hide_index=True
-        )
     if evidence.empty:
         st.warning("No relevant evidence was retrieved. Check the source configuration or try a more specific question.")
     else:
@@ -175,7 +168,7 @@ if run:
             contexts=[]
             for n,(_,row) in enumerate(evidence.iterrows(),1):
                 contexts.append(f"[{n}] Source type: {row.get('source','')} | Title: {row.get('title','')} | URL: {row.get('url','')}\nEvidence: {str(row.get('text',''))[:2200]}")
-            prompt=("Answer the research question using ONLY the supplied evidence. Combine evidence from all source types. Distinguish direct statements from interpretation, identify recurring themes only when supported by multiple records, do not invent prevalence or causation, and explicitly note source gaps. Cite claims inline as [1], [2], etc. Keep the answer structured with: Key findings, What the evidence says, Conflicting/weak evidence, and Limitations.\n\nQuestion: "+question+"\n\nEvidence:\n"+"\n\n".join(contexts))
+            prompt=("Answer the research question using ONLY the supplied evidence. Combine evidence from all source types. For YouTube comments, distinguish explicit reasons for stopping a SIP from practical questions about pausing, cancelling, restarting, or missing SIPs; do not treat a question as proof of motivation. Ignore generic praise. Identify recurring themes only when supported by multiple substantive records, do not invent prevalence or causation, and explicitly note source gaps. Cite claims inline as [1], [2], etc. Keep the answer structured with: Key findings, What the evidence says, Conflicting/weak evidence, and Limitations.\n\nQuestion: "+question+"\n\nEvidence:\n"+"\n\n".join(contexts))
             try:
                 with st.spinner("Analysing evidence from the retrieved sources..."):
                     resp=requests.post("https://api.groq.com/openai/v1/chat/completions",headers={"Authorization":f"Bearer {groq_key}","Content-Type":"application/json"},json={"model":"openai/gpt-oss-120b","messages":[{"role":"system","content":"You are a careful product research analyst. Use only supplied evidence and never fabricate sources, statistics, or citations."},{"role":"user","content":prompt}],"temperature":0.2},timeout=60)
@@ -190,7 +183,7 @@ if run:
         show=evidence[[c for c in ["source","title","text","url","date","relevance"] if c in evidence.columns]].copy()
         st.dataframe(show.rename(columns={"source":"Source type","title":"Title","text":"Evidence excerpt","url":"Original source","date":"Date","relevance":"Relevance"}),use_container_width=True,hide_index=True,column_config={"Original source":st.column_config.LinkColumn("Original source",display_text="Open source"),"Evidence excerpt":st.column_config.TextColumn(width="large")})
         st.download_button("Download evidence used (CSV)",evidence.to_csv(index=False).encode("utf-8-sig"),"groww_research_evidence.csv","text/csv")
-        st.caption("YouTube comments are retrieved from a small set of relevant videos per search, where comments are available. Search results are not exhaustive, and public comments/reviews cannot prove actual SIP retention or causation.")
+        st.caption("The app retrieves comments from a limited set of relevant videos. Generic praise is filtered out, and questions about pausing/restarting are treated as product-friction signals, not proof of why someone stopped investing. Search results are not exhaustive.")
 
 with st.expander("Source configuration and limitations"):
     st.write("Required Streamlit Secrets: TAVILY_API_KEY, YOUTUBE_API_KEY, and GROQ_API_KEY. Stored App Store reviews are searched from research_dataset.csv. The app searches a bounded set of web results and YouTube videos for each question, not every page on the internet.")
