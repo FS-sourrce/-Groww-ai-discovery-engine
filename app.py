@@ -30,9 +30,17 @@ def load_dataset():
         return pd.DataFrame(columns=["source","record_type","title","text","url","date","author","rating"])
     return normalize_frame(pd.read_csv(DATA_PATH), "Research dataset")
 
-def search_web(query, api_key, max_results=6):
+def query_variants(question):
+    q = question.strip()
+    return [
+        q + " India mutual fund SIP investor experience",
+        "why investors stop or pause SIP mutual fund India",
+        "Groww SIP pause cancel restart failed payment user problem",
+    ]
+
+def search_web(query, api_key, max_results=5):
     response = requests.post("https://api.tavily.com/search", json={
-        "api_key":api_key, "query":query + " (Groww OR SIP OR mutual fund investor)",
+        "api_key":api_key, "query":query + " (India OR Groww OR SIP OR mutual fund investor)",
         "topic":"general", "search_depth":"advanced", "max_results":max_results,
         "include_answer":False, "include_raw_content":True
     }, timeout=45)
@@ -111,7 +119,7 @@ def retrieve(question, data, top_k=20):
         return data.head(0)
 
 st.markdown("<h1>Groww AI Discovery Engine</h1><p>Ask one question. Search available evidence. Get an answer with traceable sources.</p>", unsafe_allow_html=True)
-st.caption("The engine searches the configured public-web provider and your stored research data. YouTube comments are fetched for relevant videos when the YouTube API key is configured. It cannot guarantee coverage of every public website.")
+st.caption("The engine searches the configured public-web provider and your stored research data using several focused query variations. YouTube comments are fetched for relevant videos when the YouTube API key is configured. It cannot guarantee coverage of every public website.")
 
 question=st.text_input("Your research question", placeholder="Why might first-time investors pause or stop their SIPs?")
 run=st.button("Search and generate answer", type="primary", use_container_width=True)
@@ -131,24 +139,44 @@ if run:
         if not base.empty:
             parts.append(base); source_status.append(("Stored research dataset",len(base),"Searched"))
         else: source_status.append(("Stored research dataset",0,"No usable records"))
+        variants=query_variants(question)
         if tavily_key:
             try:
-                web_df=search_web(question.strip(),tavily_key,6)
-                if not web_df.empty: parts.append(web_df)
-                source_status.append(("Live web search",len(web_df),"Searched"))
+                web_frames=[]; web_errors=[]
+                for q in variants:
+                    try:
+                        result=search_web(q,tavily_key,5)
+                        if not result.empty: web_frames.append(result)
+                    except Exception as exc:
+                        web_errors.append(str(exc))
+                web_df=pd.concat(web_frames,ignore_index=True,sort=False) if web_frames else pd.DataFrame()
+                if not web_df.empty:
+                    web_df=web_df.drop_duplicates(subset=[c for c in ["url","title"] if c in web_df.columns],keep="first")
+                    parts.append(web_df)
+                status=f"Searched {len(variants)} focused queries"
+                if web_errors: status += "; some queries failed"
+                source_status.append(("Live web search",len(web_df),status))
             except Exception as exc:
                 source_status.append(("Live web search",0,f"Search failed: {exc}"))
         else: source_status.append(("Live web search",0,"Not configured: add TAVILY_API_KEY"))
         if youtube_key:
             try:
-                videos=search_youtube(question.strip()+" Groww India",youtube_key,5)
+                video_frames=[]; yt_errors=[]
+                for q in variants:
+                    try:
+                        result=search_youtube(q + " India",youtube_key,5)
+                        if not result.empty: video_frames.append(result)
+                    except Exception as exc:
+                        yt_errors.append(str(exc))
+                videos=pd.concat(video_frames,ignore_index=True,sort=False) if video_frames else pd.DataFrame()
                 if not videos.empty:
+                    videos=videos.drop_duplicates(subset=["video_id"],keep="first").head(12)
                     comments, comment_errors=get_youtube_comments(videos,youtube_key,30)
                     if not comments.empty: parts.append(comments)
-                    source_status.append(("YouTube public comments",len(comments),f"Searched {len(videos)} videos; fetched available comments"))
-                    if comment_errors:
-                        source_status.append(("YouTube comment access",0,"Some videos had comments disabled or unavailable"))
-                else: source_status.append(("YouTube public comments",0,"No relevant videos found"))
+                    status=f"Searched {len(variants)} focused queries across {len(videos)} unique videos; fetched available comments"
+                    if yt_errors or comment_errors: status += "; some videos or queries were unavailable"
+                    source_status.append(("YouTube public comments",len(comments),status))
+                else: source_status.append(("YouTube public comments",0,"No relevant videos found across focused queries"))
             except Exception as exc:
                 source_status.append(("YouTube public comments",0,f"Search failed: {exc}"))
         else: source_status.append(("YouTube public comments",0,"Not configured: add YOUTUBE_API_KEY"))
@@ -183,7 +211,7 @@ if run:
         show=evidence[[c for c in ["source","title","text","url","date","relevance"] if c in evidence.columns]].copy()
         st.dataframe(show.rename(columns={"source":"Source type","title":"Title","text":"Evidence excerpt","url":"Original source","date":"Date","relevance":"Relevance"}),use_container_width=True,hide_index=True,column_config={"Original source":st.column_config.LinkColumn("Original source",display_text="Open source"),"Evidence excerpt":st.column_config.TextColumn(width="large")})
         st.download_button("Download evidence used (CSV)",evidence.to_csv(index=False).encode("utf-8-sig"),"groww_research_evidence.csv","text/csv")
-        st.caption("The app retrieves comments from a limited set of relevant videos. Generic praise is filtered out, and questions about pausing/restarting are treated as product-friction signals, not proof of why someone stopped investing. Search results are not exhaustive.")
+        st.caption("The app searches three focused query variations, up to 12 unique YouTube videos, and up to 5 web results per query. Generic praise is filtered out, and questions about pausing/restarting are treated as product-friction signals, not proof of why someone stopped investing. Search results are not exhaustive.")
 
 with st.expander("Source configuration and limitations"):
     st.write("Required Streamlit Secrets: TAVILY_API_KEY, YOUTUBE_API_KEY, and GROQ_API_KEY. Stored App Store reviews are searched from research_dataset.csv. The app searches a bounded set of web results and YouTube videos for each question, not every page on the internet.")
