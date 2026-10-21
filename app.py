@@ -563,5 +563,4 @@ with tab6:
     st.caption("Only public top-level comments are collected. Replies are not included. Search results are leads, not proof of investor retention or churn.")
 
 st.divider()
-
 st.caption("Built for discovery, not investment advice. No specific funds or stocks are recommended. No fear, FOMO, or urgency-based nudges are generated.")
