@@ -181,6 +181,44 @@ def fetch_youtube_comments(video_ids, api_key, max_comments_each, video_title_ma
                 break
     return pd.DataFrame(all_rows), errors
 
+
+def search_tavily(query, api_key, max_results=8):
+    """Search live public web sources using Tavily and normalize them as evidence rows."""
+    response = requests.post(
+        "https://api.tavily.com/search",
+        json={
+            "api_key": api_key,
+            "query": query + " (Groww OR SIP OR mutual fund investor)",
+            "topic": "general",
+            "search_depth": "advanced",
+            "max_results": max(3, min(int(max_results), 10)),
+            "include_answer": False,
+            "include_raw_content": True,
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = []
+    for item in payload.get("results", []):
+        url = str(item.get("url", ""))
+        title = str(item.get("title", "Untitled source"))
+        content = str(item.get("raw_content") or item.get("content") or "").strip()
+        if not content:
+            continue
+        # Keep source text bounded so the AI context remains manageable.
+        rows.append({
+            "source": "Live web search",
+            "record_type": "Web evidence",
+            "title": title,
+            "text": content[:5000],
+            "url": url,
+            "date": str(item.get("published_date", "") or ""),
+            "author": str(item.get("author", "") or ""),
+            "rating": "",
+        })
+    return pd.DataFrame(rows)
+
 try:
     df = load_data()
 except Exception as e:
@@ -280,23 +318,41 @@ with tab1:
         if not question.strip():
             st.warning("Enter a question first.")
         else:
-            # Exclude placeholder video-lead records from answer evidence. They describe
-            # a search target, not what an investor actually said.
-            eligible = df.copy()
-            lead_mask = eligible["record_type"].astype(str).str.lower().str.contains("video lead|youtube video", regex=True)
-            eligible = eligible.loc[~lead_mask].copy()
-            eligible = eligible[eligible["text"].astype(str).str.strip().ne("")]
-            corpus = (eligible["title"].fillna("").astype(str) + "\n" + eligible["text"].fillna("").astype(str)).tolist()
-            try:
-                vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=30000, sublinear_tf=True)
-                matrix = vectorizer.fit_transform(corpus + [question])
-                scores = cosine_similarity(matrix[-1], matrix[:-1]).ravel()
-                ranked_idx = scores.argsort()[::-1]
-                ranked_idx = [i for i in ranked_idx if scores[i] > 0][:top_k]
-            except ValueError:
-                ranked_idx = []
+            with st.spinner("Searching live public sources and your available research data..."):
+                # Start with locally stored evidence, excluding placeholder video leads.
+                eligible = df.copy()
+                lead_mask = eligible["record_type"].astype(str).str.lower().str.contains("video lead|youtube video", regex=True)
+                eligible = eligible.loc[~lead_mask].copy()
+                eligible = eligible[eligible["text"].astype(str).str.strip().ne("")]
+                live = pd.DataFrame()
+                try:
+                    tavily_key = st.secrets.get("TAVILY_API_KEY", "")
+                except Exception:
+                    tavily_key = ""
+                if tavily_key:
+                    try:
+                        live = search_tavily(question.strip(), tavily_key, max_results=max(5, top_k))
+                    except Exception as exc:
+                        st.warning("Live web search failed. The app will still search its stored evidence.")
+                        st.caption(f"Search provider detail: {exc}")
+                if not live.empty:
+                    live["search_blob"] = (live["title"].astype(str) + " " + live["text"].astype(str)).str.lower()
+                    live["theme"] = live.apply(classify_theme, axis=1)
+                    live["sip_evidence"] = live["text"].apply(classify_sip)
+                    all_cols = list(dict.fromkeys(list(eligible.columns) + list(live.columns)))
+                    eligible = pd.concat([eligible.reindex(columns=all_cols), live.reindex(columns=all_cols)], ignore_index=True, sort=False).fillna("")
+                # Rank local records and live search results together using lexical similarity.
+                corpus = (eligible["title"].fillna("").astype(str) + "\n" + eligible["text"].fillna("").astype(str)).tolist()
+                try:
+                    vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=30000, sublinear_tf=True)
+                    matrix = vectorizer.fit_transform(corpus + [question])
+                    scores = cosine_similarity(matrix[-1], matrix[:-1]).ravel()
+                    ranked_idx = [i for i in scores.argsort()[::-1] if scores[i] > 0][:top_k]
+                except ValueError:
+                    scores = []
+                    ranked_idx = []
             if not ranked_idx:
-                st.warning("No relevant evidence was found in the current dataset. Try a more specific or differently worded question.")
+                st.warning("No relevant evidence was found. Try a more specific question or check your Tavily API key in Streamlit Secrets.")
             else:
                 evidence = eligible.iloc[ranked_idx].copy()
                 evidence["relevance_score"] = [round(float(scores[i]), 3) for i in ranked_idx]
@@ -304,29 +360,29 @@ with tab1:
                 show = evidence[["source", "title", "text", "url", "relevance_score"]].copy()
                 st.dataframe(show.rename(columns={"source":"Source", "title":"Title", "text":"Evidence", "url":"Source URL", "relevance_score":"Relevance"}), use_container_width=True, hide_index=True, column_config={"Source URL": st.column_config.LinkColumn("Source URL", display_text="Open source"), "Evidence": st.column_config.TextColumn(width="large")})
                 try:
-                    api_key = st.secrets.get("GROQ_API_KEY", "")
+                    groq_key = st.secrets.get("GROQ_API_KEY", "")
                 except Exception:
-                    api_key = ""
-                if not api_key:
-                    api_key = st.text_input("Groq API key (optional, not saved)", type="password", key="groq_key_input", help="Add a Groq API key to generate a written answer. Without it, semantic retrieval still works.")
-                if api_key:
+                    groq_key = ""
+                if not groq_key:
+                    groq_key = st.text_input("Groq API key (optional, not saved)", type="password", key="groq_key_input", help="Add a Groq API key to generate the written research answer.")
+                if groq_key:
                     context_parts = []
                     for n, (_, row) in enumerate(evidence.iterrows(), start=1):
                         context_parts.append(f"[{n}] Source: {row.get('source','')} | Title: {row.get('title','')} | URL: {row.get('url','')}\nEvidence: {str(row.get('text',''))[:2500]}")
-                    prompt = ("Answer the user's research question using ONLY the evidence below. Do not invent facts or claim the sample represents all Groww investors. Clearly distinguish direct evidence from cautious interpretation. If evidence is insufficient, say so. Cite evidence inline as [1], [2], etc., matching the numbered records.\n\nQuestion: " + question + "\n\nEvidence:\n" + "\n\n".join(context_parts))
+                    prompt = ("Answer the user's research question using ONLY the evidence below. Prioritize evidence that directly concerns Groww and SIP/mutual-fund investors. Do not invent facts, prevalence, or citations. Separate direct evidence from interpretation, note conflicts and limitations, and state when evidence is insufficient. Cite evidence inline as [1], [2], etc., matching the numbered records.\n\nQuestion: " + question + "\n\nEvidence:\n" + "\n\n".join(context_parts))
                     try:
-                        with st.spinner("Generating an evidence-grounded answer..."):
-                            response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model":"openai/gpt-oss-120b", "messages":[{"role":"system","content":"You are a careful product research analyst. Never make up evidence, statistics, or citations."},{"role":"user","content":prompt}], "temperature":0.2}, timeout=45)
+                        with st.spinner("Analysing retrieved evidence..."):
+                            response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"}, json={"model":"openai/gpt-oss-120b", "messages":[{"role":"system","content":"You are a careful product research analyst. Never make up evidence, statistics, or citations."},{"role":"user","content":prompt}], "temperature":0.2}, timeout=45)
                         response.raise_for_status()
                         answer = response.json()["choices"][0]["message"]["content"]
-                        st.markdown("#### AI answer")
+                        st.markdown("#### AI research answer")
                         st.markdown(answer)
                     except Exception as exc:
-                        st.error("AI answer generation failed. Check that the API key is valid and try again. Retrieval results above are still available.")
+                        st.error("AI answer generation failed. Check GROQ_API_KEY. Retrieved evidence remains available above.")
                         st.caption(f"Technical detail: {exc}")
                 else:
-                    st.info("Semantic retrieval is working. To generate written AI answers, add a Groq API key in Streamlit Secrets as GROQ_API_KEY, or enter one above for this session.")
-                st.caption("Method note: TF-IDF semantic-style retrieval ranks textual similarity; it is not an embedding model. Results are exploratory and must be checked against original sources. Public discussions cannot establish Groww's actual 12-month SIP retention rate.")
+                    st.info("Evidence retrieval works. Add GROQ_API_KEY in Streamlit Secrets to generate a written AI answer.")
+                st.caption("Method note: live web results depend on what the search provider can discover and retrieve. Public comments and reviews can suggest problems but cannot establish actual SIP retention rates.")
 
 with tab2:
     st.subheader("Search results")
