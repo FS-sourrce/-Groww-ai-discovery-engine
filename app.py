@@ -272,6 +272,19 @@ with tab1:
             # Exclude placeholder video-lead records from answer evidence. They describe
             # a search target, not what an investor actually said.
             eligible = df.copy()
+            # Include comments uploaded by the user or collected in this session.
+            session_comments = st.session_state.get("youtube_comments_df", pd.DataFrame())
+            if isinstance(session_comments, pd.DataFrame) and not session_comments.empty:
+                comments_for_search = session_comments.copy()
+                for col, default in {"source":"YouTube", "record_type":"YouTube comment", "title":"YouTube comment", "text":"", "url":"", "date":"", "theme":"Unclassified", "sip_evidence":"Potential SIP evidence", "rating":"", "author":""}.items():
+                    if col not in comments_for_search.columns:
+                        comments_for_search[col] = default
+                comments_for_search["source"] = comments_for_search["source"].replace("", "YouTube")
+                comments_for_search["record_type"] = comments_for_search["record_type"].replace("", "YouTube comment")
+                comments_for_search["title"] = comments_for_search["title"].replace("", "YouTube comment")
+                comments_for_search["text"] = comments_for_search["text"].astype(str)
+                comments_for_search = comments_for_search[comments_for_search["text"].str.strip().ne("")]
+                eligible = pd.concat([eligible, comments_for_search], ignore_index=True, sort=False)
             lead_mask = eligible["record_type"].astype(str).str.lower().str.contains("video lead|youtube video", regex=True)
             eligible = eligible.loc[~lead_mask].copy()
             eligible = eligible[eligible["text"].astype(str).str.strip().ne("")]
@@ -511,7 +524,9 @@ with tab6:
                 if all_comments:
                     collected = pd.concat(all_comments, ignore_index=True)
                     old = st.session_state.get("youtube_comments_df", pd.DataFrame())
-                    combined = pd.concat([old, collected], ignore_index=True)
+                    # Align columns before concatenation; the existing session may be empty
+                    # or have a different schema from the newly collected comment rows.
+                    combined = pd.concat([old, collected], ignore_index=True, sort=False)
                     combined = combined.drop_duplicates(subset=["comment_id"], keep="first")
                     st.session_state["youtube_comments_df"] = combined
                     st.success(f"Collected {len(collected)} comments in this run. {len(combined)} unique comments are available in this session.")
@@ -548,4 +563,5 @@ with tab6:
     st.caption("Only public top-level comments are collected. Replies are not included. Search results are leads, not proof of investor retention or churn.")
 
 st.divider()
+
 st.caption("Built for discovery, not investment advice. No specific funds or stocks are recommended. No fear, FOMO, or urgency-based nudges are generated.")
